@@ -1,0 +1,339 @@
+/*
+  MIT License
+  Copyright (c) 2019 by Jacob Wachlin
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+*/
+
+// A minimum example of using esp-now for communication on ESP32 HW
+
+#include <WiFi.h>
+#include <esp_now.h>
+#include <stdint.h>
+#include <string.h>
+
+////////////////////////////////////////////////////////////
+#include <SPI.h>
+#include "LedMatrix.h"
+#include <HX711_ADC.h>
+#include <LiquidCrystal.h> //LCD-Bibliothek laden
+#include <MFRC522.h> // RFID-Bibiothek hinzufügen
+
+const int RST_PIN = 22; // Reset pin
+const int SS_PIN = 21; // Slave select pin
+
+#define NUMBER_OF_DEVICES 1
+#define CS_PIN 15
+LedMatrix ledMatrix = LedMatrix(NUMBER_OF_DEVICES, CS_PIN);
+
+HX711_ADC LoadCell(32, 33);
+LiquidCrystal lcd(21, 22, 14, 25, 26, 27);
+MFRC522 mfrc522(SS_PIN, RST_PIN); // RFID-Empfänger benennen
+////////////////////////////////////////////////////////////
+
+#define WIFI_CHANNEL                        (1)
+#define LED_PIN                             (5)
+// SENDER and RECEIVER are arbitrary with ESP-NOW, this is solely for this example
+
+
+
+
+//#define SENDER
+#define SENDER
+
+
+
+
+
+
+#ifndef SENDER
+#define RECEIVER
+#endif
+
+static uint8_t broadcast_mac[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+
+float scaleWeight = 0.0;
+int activeFruit = 0;
+
+typedef struct __attribute__((packed)) esp_now_msg_t
+{
+  uint32_t address;
+  uint32_t weight;
+  uint32_t fruit;
+  // Can put lots of things here...
+} esp_now_msg_t;
+
+
+
+static void handle_error(esp_err_t err)
+{
+  switch (err)
+  {
+    case ESP_ERR_ESPNOW_NOT_INIT:
+      Serial.println("Not init");
+      break;
+
+    case ESP_ERR_ESPNOW_ARG:
+      Serial.println("Argument invalid");
+      break;
+
+    case ESP_ERR_ESPNOW_INTERNAL:
+      Serial.println("Internal error");
+      break;
+
+    case ESP_ERR_ESPNOW_NO_MEM:
+      Serial.println("Out of memory");
+      break;
+
+    case ESP_ERR_ESPNOW_NOT_FOUND:
+      Serial.println("Peer is not found");
+      break;
+
+    case ESP_ERR_ESPNOW_IF:
+      Serial.println("Current WiFi interface doesn't match that of peer");
+      break;
+
+    default:
+      break;
+  }
+}
+
+static void msg_recv_cb(const uint8_t *mac_addr, const uint8_t *data, int len)
+{
+  if (len == sizeof(esp_now_msg_t))
+  {
+    esp_now_msg_t msg;
+    memcpy(&msg, data, len);
+
+    scaleWeight = msg.weight;
+    activeFruit = msg.fruit;
+
+    Serial.print("Fruit ");
+    Serial.println(activeFruit);
+    Serial.print("Weight: ");
+    Serial.println(scaleWeight);
+
+     
+  ////////////////////////////////////////////////
+#ifdef RECEIVER
+  delay(200);
+
+  float weightMod = 500.0;
+
+  if(activeFruit == 1) {
+    weightMod = 90;
+  }
+
+  if(activeFruit == 2) {
+    weightMod = 450;
+  }
+
+  //int ledBytes = (0 << full) + (1 << full - 1);
+  Serial.println(scaleWeight);
+  int activeLines = (scaleWeight / weightMod) * 9.0;
+  Serial.println(activeLines);
+  ledMatrix.clear();
+  for (int i = 0; i < (int)activeLines; i++) {
+    ledMatrix.setColumn(i, 255);
+  }
+  ledMatrix.commit();
+  
+#endif
+  ////////////////////////////////////////////////
+
+    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+  }
+}
+
+static void msg_send_cb(const uint8_t* mac, esp_now_send_status_t sendStatus)
+{
+
+  switch (sendStatus)
+  {
+    case ESP_NOW_SEND_SUCCESS:
+      Serial.println("Send success");
+      break;
+
+    case ESP_NOW_SEND_FAIL:
+      Serial.println("Send Failure");
+      break;
+
+    default:
+      break;
+  }
+}
+
+static void send_msg(esp_now_msg_t * msg)
+{
+  // Pack
+  uint16_t packet_size = sizeof(esp_now_msg_t);
+  uint8_t msg_data[packet_size];
+  memcpy(&msg_data[0], msg, sizeof(esp_now_msg_t));
+
+  esp_err_t status = esp_now_send(broadcast_mac, msg_data, packet_size);
+  if (ESP_OK != status)
+  {
+    Serial.println("Error sending message");
+    handle_error(status);
+  }
+}
+
+static void network_setup(void)
+{
+  //Puts ESP in STATION MODE
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+
+  if (esp_now_init() != 0)
+  {
+    return;
+  }
+
+  esp_now_peer_info_t peer_info;
+  peer_info.channel = WIFI_CHANNEL;
+  memcpy(peer_info.peer_addr, broadcast_mac, 6);
+  peer_info.ifidx = ESP_IF_WIFI_STA;
+  peer_info.encrypt = false;
+  esp_err_t status = esp_now_add_peer(&peer_info);
+  if (ESP_OK != status)
+  {
+    Serial.println("Could not add peer");
+    handle_error(status);
+  }
+
+  // Set up callback
+  status = esp_now_register_recv_cb(msg_recv_cb);
+  if (ESP_OK != status)
+  {
+    Serial.println("Could not register callback");
+    handle_error(status);
+  }
+
+  status = esp_now_register_send_cb(msg_send_cb);
+  if (ESP_OK != status)
+  {
+    Serial.println("Could not register send callback");
+    handle_error(status);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
+  ////////////////////////////////////////////////
+  SPI.begin(); // SPI-Verbindung aufbauen
+  #ifdef RECEIVER
+    ledMatrix.init();
+    ledMatrix.setIntensity(1); // range is 0-15
+  #endif
+
+  #ifdef SENDER
+    float calValue = -113.69; // calibration value
+    mfrc522.PCD_Init(); // Initialisierung des RFID-Empfängers
+    LoadCell.begin();
+    long stabilisingtime = 500; // tare preciscion can be improved by adding a few seconds of stabilising time
+    LoadCell.start(stabilisingtime);
+    if(LoadCell.getTareTimeoutFlag()) {
+      Serial.println("Tare timeout, check MCU>HX711 wiring and pin designations");
+    }
+    else {
+      LoadCell.setCalFactor(calValue); // set calibration value (float)
+      Serial.println("Startup + tare is complete");
+    }
+  #endif
+
+  lcd.begin(16, 2); //Im Setup wird angegeben, wie viele Zeichen und Zeilen verwendet werden. Hier: 16 Zeichen in 2 Zeilen.
+  lcd.clear();
+  lcd.setCursor(0, 0); //Startposition der Darstellung auf dem LCD festlegen. lcd.setCursor(0,0) bedeutet: Erstes Zeichen in der ersten Zeile.
+  lcd.print("Ready"); //Dort soll der Text „www.funduino.de“ erscheinen. Der Befehl lcd.setCursor ist dem Mikrocontrollerboard durch das Aufrufen der Bibliothek bekannt.
+  lcd.setCursor(0, 1); // lcd.setCursor(0,1) bedeutet: Erstes Zeichen in der zweiten Zeile.
+  lcd.print("__________"); //Dort soll dann der Text „Viel Erfolg!!!“ auftauchen.
+  ////////////////////////////////////////////////
+
+  network_setup();
+}
+
+void loop() {
+  // Need some delay for watchdog feeding in loop
+
+    delay(200);
+
+  #ifdef RECEIVER
+    lcd.clear();
+    lcd.setCursor(0, 0); //Startposition der Darstellung auf dem LCD festlegen. lcd.setCursor(0,0) bedeutet: Erstes Zeichen in der ersten Zeile.
+    lcd.print("" + String(scaleWeight, 0) + "g"); //Dort soll der Text „www.funduino.de“ erscheinen. Der Befehl lcd.setCursor ist dem Mikrocontrollerboard durch das Aufrufen der Bibliothek bekannt.
+  #endif
+
+  #ifdef SENDER
+    ////////////////////////////////////////////////
+    
+    LoadCell.update();
+    float scaleValue = LoadCell.getData();
+    
+    if (Serial.available() > 0) {
+      float i;
+      char inByte = Serial.read();
+      if (inByte == 't') LoadCell.tareNoDelay();
+    }
+    
+    //check if last tare operation is complete
+    if (LoadCell.getTareStatus() == true) {
+      Serial.println("Tare complete");
+    }
+  
+    esp_now_msg_t msg;
+    msg.address = 0;
+    msg.fruit = activeFruit;
+    msg.weight = max((float)0.0, min(scaleValue, (float)10000.00));
+    send_msg(&msg);
+  
+    if ( ! mfrc522.PICC_IsNewCardPresent()) { // Wenn keine Karte in Reichweite ist...
+      return; // ...springt das Programm zurück vor die if-Schleife, womit sich die Abfrage wiederholt.
+    }
+  
+  
+    if ( ! mfrc522.PICC_ReadCardSerial()) { // Wenn kein RFID-Sender ausgewählt wurde
+      return; // ...springt das Programm zurück vor die if-Schleife, womit sich die Abfrage wiederholt.
+    }
+  
+    String id = "";
+  
+    for (byte i = 0; i < mfrc522.uid.size; i++) {
+      id += mfrc522.uid.uidByte[i]; // Dann wird die UID ausgelesen, die aus vier einzelnen Blöcken besteht und der Reihe nach an den Serial Monitor gesendet. Die Endung Hex bedeutet, dass die vier Blöcke der UID als HEX-Zahl (also auch mit Buchstaben) ausgegeben wird
+    }
+    Serial.println(id);
+    lcd.clear();
+    if (id == "128156121162") {
+      lcd.setCursor(0, 0); //Startposition der Darstellung auf dem LCD festlegen. lcd.setCursor(0,0) bedeutet: Erstes Zeichen in der ersten Zeile.
+      lcd.print("Tomaten"); //Dort soll der Text „www.funduino.de“ erscheinen. Der Befehl lcd.setCursor ist dem Mikrocontrollerboard durch das Aufrufen der Bibliothek bekannt.
+      lcd.setCursor(0, 1); // lcd.setCursor(0,1) bedeutet: Erstes Zeichen in der zweiten Zeile.
+      lcd.print("Noch 3 Tage"); //Dort soll der Text „www.funduino.de“ erscheinen. Der Befehl lcd.setCursor ist dem Mikrocontrollerboard durch das Aufrufen der Bibliothek bekannt.
+      activeFruit = 1;
+    } else if (id == "48125122162") {
+      lcd.setCursor(0, 0); //Startposition der Darstellung auf dem LCD festlegen. lcd.setCursor(0,0) bedeutet: Erstes Zeichen in der ersten Zeile.
+      lcd.print("Salat"); //Dort soll der Text „www.funduino.de“ erscheinen. Der Befehl lcd.setCursor ist dem Mikrocontrollerboard durch das Aufrufen der Bibliothek bekannt.
+      lcd.setCursor(0, 1); // lcd.setCursor(0,1) bedeutet: Erstes Zeichen in der zweiten Zeile.
+      lcd.print("Noch 5 Tage"); //Dort soll der Text „www.funduino.de“ erscheinen. Der Befehl lcd.setCursor ist dem Mikrocontrollerboard durch das Aufrufen der Bibliothek bekannt.
+      activeFruit = 2;
+    }
+    ////////////////////////////////////////////////
+    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+  #endif
+
+}
